@@ -6,11 +6,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 检查 Cloudflare 凭证
   check_credentials:
     runs-on: ubuntu-latest
     name: Check for Cloudflare Credentials
+
     outputs:
       has_creds: ${{ steps.cf_creds.outputs.has_creds }}
+
     steps:
       - name: Check for Cloudflare credentials
         id: cf_creds
@@ -26,6 +29,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
+  # 部署 Job
   deploy:
     runs-on: ubuntu-latest
     name: Deploy
@@ -33,31 +37,38 @@ jobs:
     if: needs.check_credentials.outputs.has_creds == 'true'
 
     steps:
+      # 检出代码
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 设置 pnpm
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      # 设置 Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
 
+      # 安装依赖
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 测试
       - name: Test
         run: pnpm test
 
+      # 类型检查
       - name: Typecheck
         run: pnpm typecheck
 
+      # 构建
       - name: Build
         run: pnpm run build
 
-      # 使用 Python 替换配置，避免 sed 特殊字符导致失败
+      # 配置 Wrangler
       - name: Configure Wrangler
         run: |
           python3 <<'PY'
@@ -70,17 +81,28 @@ jobs:
           with open(path, "r", encoding="utf-8") as f:
               config = f.read()
 
-          # 必须配置的数据库信息
-          required = ["D1_DATABASE_ID", "D1_DATABASE_NAME"]
-          for key in required:
-              if not os.environ.get(key):
+          # 必需配置检查
+          required_vars = [
+              "D1_DATABASE_ID",
+              "D1_DATABASE_NAME",
+          ]
+
+          for key in required_vars:
+              if not os.environ.get(key, "").strip():
                   sys.exit(f"Error: {key} is required")
 
           # TOML 字符串转义
           def toml_escape(value):
-              return value.replace("\\", "\\\\").replace('"', '\\"')
+              return (
+                  value
+                  .replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+                  .replace("\t", "\\t")
+              )
 
-          # 替换字符串占位符
+          # 字符串配置替换
           string_vars = [
               "D1_DATABASE_ID",
               "D1_DATABASE_NAME",
@@ -89,76 +111,132 @@ jobs:
               "TURNSTILE_KEY",
               "TURNSTILE_SECRET",
               "MAILBOX_TOKEN_SECRET",
-              "SEND_CHANNEL",
               "SENDER_EMAIL",
-              "PASSWORD",
-              "SHOW_AFF",
           ]
 
           for key in string_vars:
               value = os.environ.get(key, "")
+
+              if key == "EMAIL_DOMAIN":
+                  value = value.strip()
+
               config = config.replace(
                   "${" + key + "}",
                   toml_escape(value)
               )
 
-          # 邮件渠道配置
-          send_channel = os.environ.get("SEND_CHANNEL", "").strip().lower()
+          # 邮件发送渠道
+          send_channel = os.environ.get(
+              "SEND_CHANNEL", ""
+          ).strip().lower()
 
           if send_channel:
+
               if send_channel == "resend":
                   if not os.environ.get("RESEND_API_KEY"):
-                      sys.exit("Error: RESEND_API_KEY is required for resend")
+                      sys.exit(
+                          "Error: RESEND_API_KEY is required for resend"
+                      )
+
               elif send_channel == "mailchannels":
                   if not os.environ.get("MAILCHANNELS_API_KEY"):
-                      sys.exit("Error: MAILCHANNELS_API_KEY is required for mailchannels")
+                      sys.exit(
+                          "Error: MAILCHANNELS_API_KEY is required for mailchannels"
+                      )
+
               elif send_channel == "cloudflare":
                   pass
-              elif send_channel == "send_email":
-                  print("::warning::SEND_CHANNEL=send_email is deprecated; use cloudflare instead.")
-                  send_channel = "cloudflare"
-                  config = config.replace("${SEND_CHANNEL}", "cloudflare")
-              else:
-                  sys.exit(f"Unsupported SEND_CHANNEL: {send_channel}")
 
+              elif send_channel == "send_email":
+                  print(
+                      "::warning::SEND_CHANNEL=send_email is deprecated; "
+                      "use cloudflare instead."
+                  )
+                  send_channel = "cloudflare"
+
+              else:
+                  sys.exit(
+                      f"Error: Unsupported SEND_CHANNEL: {send_channel}"
+                  )
+
+              # 邮件发送必需配置
               if not os.environ.get("SENDER_EMAIL"):
                   sys.exit("Error: SENDER_EMAIL is required")
 
               if not os.environ.get("MAILBOX_TOKEN_SECRET"):
                   sys.exit("Error: MAILBOX_TOKEN_SECRET is required")
 
+              config = config.replace(
+                  "${SEND_CHANNEL}",
+                  send_channel
+              )
+
           else:
-              # 未配置邮件发送时，移除相关配置项
-              for key in ["SEND_CHANNEL", "SENDER_EMAIL", "MAILBOX_TOKEN_SECRET"]:
+              # 未启用邮件时删除相关配置
+              for key in [
+                  "SEND_CHANNEL",
+                  "SENDER_EMAIL",
+                  "MAILBOX_TOKEN_SECRET",
+              ]:
                   config = re.sub(
-                      rf"(?m)^\s*{key}\s*=.*\n?",
+                      rf"(?m)^[ \t]*{key}[ \t]*=.*\n?",
                       "",
                       config
                   )
 
-          # 可选配置项：为空时删除对应行
-          optional_vars = [
+          # 可选字符串配置
+          optional_string_vars = [
               "PASSWORD",
-              "API_RATE_LIMIT_PER_MINUTE",
               "SHOW_AFF",
+          ]
+
+          for key in optional_string_vars:
+              value = os.environ.get(key, "")
+
+              if value:
+                  config = config.replace(
+                      "${" + key + "}",
+                      toml_escape(value)
+                  )
+              else:
+                  config = re.sub(
+                      rf"(?m)^[ \t]*{key}[ \t]*=.*\n?",
+                      "",
+                      config
+                  )
+
+          # 可选数字配置
+          optional_numeric_vars = [
+              "API_RATE_LIMIT_PER_MINUTE",
               "SEND_RATE_LIMIT_PER_MINUTE",
               "SEND_IP_RATE_LIMIT_PER_MINUTE",
           ]
 
-          for key in optional_vars:
-              value = os.environ.get(key, "")
+          for key in optional_numeric_vars:
+              value = os.environ.get(key, "").strip()
+
               if value:
-                  config = config.replace("${" + key + "}", value)
+                  if not value.isdigit():
+                      sys.exit(
+                          f"Error: {key} must be a numeric value"
+                      )
+
+                  config = config.replace(
+                      "${" + key + "}",
+                      value
+                  )
               else:
                   config = re.sub(
-                      rf"(?m)^\s*{key}\s*=.*\n?",
+                      rf"(?m)^[ \t]*{key}[ \t]*=.*\n?",
                       "",
                       config
                   )
 
           # OpenAPI 开关
           enable_openapi = (
-              os.environ.get("ENABLE_OPENAPI", "").strip().lower() == "true"
+              os.environ.get("ENABLE_OPENAPI", "")
+              .strip()
+              .lower() == "true"
           )
 
           config = re.sub(
@@ -167,11 +245,19 @@ jobs:
               config
           )
 
-          # 检查是否仍残留占位符
-          leftovers = re.findall(r"\$\{[A-Z0-9_]+\}", config)
-          if leftovers:
-              sys.exit("Error: unresolved placeholders: " + ", ".join(sorted(set(leftovers))))
+          # 检查残留占位符
+          leftovers = re.findall(
+              r"\$\{[A-Z0-9_]+\}",
+              config
+          )
 
+          if leftovers:
+              sys.exit(
+                  "Error: Unresolved placeholders: "
+                + ", ".join(sorted(set(leftovers)))
+              )
+
+          # 写入配置文件
           with open(path, "w", encoding="utf-8") as f:
               f.write(config)
 
@@ -196,13 +282,16 @@ jobs:
           MAILCHANNELS_API_KEY: ${{ secrets.MAILCHANNELS_API_KEY }}
           MAILBOX_TOKEN_SECRET: ${{ secrets.MAILBOX_TOKEN_SECRET }}
 
+      # 应用 D1 数据库迁移
       - name: Apply D1 Migrations
-        run: npx wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote
+        run: |
+          npx wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
 
+      # 部署 Cloudflare Workers
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
         with:
@@ -210,6 +299,7 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           wranglerVersion: "4.111.0"
 
+      # 配置邮件发送密钥
       - name: Configure sender secrets
         run: |
           if [ -z "$SEND_CHANNEL" ]; then
@@ -221,12 +311,14 @@ jobs:
 
           if [ -n "$RESEND_API_KEY" ]; then
             echo "Setting RESEND_API_KEY..."
-            printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
+            printf '%s' "$RESEND_API_KEY" \
+              | npx wrangler secret put RESEND_API_KEY
           fi
 
           if [ -n "$MAILCHANNELS_API_KEY" ]; then
             echo "Setting MAILCHANNELS_API_KEY..."
-            printf '%s' "$MAILCHANNELS_API_KEY" | npx wrangler secret put MAILCHANNELS_API_KEY
+            printf '%s' "$MAILCHANNELS_API_KEY" \
+              | npx wrangler secret put MAILCHANNELS_API_KEY
           fi
 
           echo "Secrets configured successfully"
