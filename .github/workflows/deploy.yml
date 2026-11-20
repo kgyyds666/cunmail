@@ -1,12 +1,11 @@
 # 工作流名称
 name: Deploy to Cloudflare
 
-# 触发条件：仅手动触发
+# 仅手动触发
 on:
   workflow_dispatch:
 
 jobs:
-  # 新增一个 job 用于检查密钥是否存在
   check_credentials:
     runs-on: ubuntu-latest
     name: Check for Cloudflare Credentials
@@ -16,37 +15,36 @@ jobs:
       - name: Check for Cloudflare credentials
         id: cf_creds
         run: |
-          if [ -z "${{ secrets.CF_API_TOKEN }}" ] || [ -z "${{ secrets.CF_ACCOUNT_ID }}" ]; then
+          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ACCOUNT_ID" ]; then
             echo "Cloudflare credentials not found, skipping deployment."
-            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
           else
             echo "Cloudflare credentials found."
-            echo "has_creds=true" >> $GITHUB_OUTPUT
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
 
-  # 部署 job，依赖于 check_credentials job 的结果
   deploy:
     runs-on: ubuntu-latest
     name: Deploy
-    needs: check_credentials # 依赖于上一个 job
-    if: needs.check_credentials.outputs.has_creds == 'true' # 只有在密钥存在时才运行
+    needs: check_credentials
+    if: needs.check_credentials.outputs.has_creds == 'true'
+
     steps:
-      # 检出代码
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 设置 pnpm (版本由根目录 package.json 的 "packageManager" 字段决定)
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
-      # 设置 Node.js 环境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: "pnpm"
+          cache: pnpm
 
-      # 安装依赖
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -56,73 +54,129 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # 运行构建
       - name: Build
         run: pnpm run build
 
-      # 配置 Wrangler (替换占位符)
+      # 使用 Python 替换配置，避免 sed 特殊字符导致失败
       - name: Configure Wrangler
         run: |
-          sed -i "s#\${D1_DATABASE_ID}#${D1_DATABASE_ID}#g" wrangler.toml
-          sed -i "s#\${D1_DATABASE_NAME}#${D1_DATABASE_NAME}#g" wrangler.toml
-          sed -i "s#\${EMAIL_DOMAIN}#${EMAIL_DOMAIN}#g" wrangler.toml
-          sed -i "s#\${COOKIES_SECRET}#${COOKIES_SECRET}#g" wrangler.toml
-          sed -i "s#\${TURNSTILE_KEY}#${TURNSTILE_KEY}#g" wrangler.toml
-          sed -i "s#\${TURNSTILE_SECRET}#${TURNSTILE_SECRET}#g" wrangler.toml
-          if [ -n "${SEND_CHANNEL}" ]; then
-            case "${SEND_CHANNEL}" in
-              resend)
-                [ -n "${RESEND_API_KEY}" ] || { echo "RESEND_API_KEY is required"; exit 1; }
-                ;;
-              mailchannels)
-                [ -n "${MAILCHANNELS_API_KEY}" ] || { echo "MAILCHANNELS_API_KEY is required"; exit 1; }
-                ;;
-              cloudflare) ;;
-              send_email)
-                echo "::warning::SEND_CHANNEL=send_email is deprecated; use cloudflare instead."
-                SEND_CHANNEL=cloudflare
-                ;;
-              *) echo "Unsupported SEND_CHANNEL: ${SEND_CHANNEL}"; exit 1 ;;
-            esac
-            [ -n "${SENDER_EMAIL}" ] || { echo "SENDER_EMAIL is required"; exit 1; }
-            [ -n "${MAILBOX_TOKEN_SECRET}" ] || { echo "MAILBOX_TOKEN_SECRET is required"; exit 1; }
-            sed -i "s#\${MAILBOX_TOKEN_SECRET}#${MAILBOX_TOKEN_SECRET}#g" wrangler.toml
-            sed -i "s#\${SEND_CHANNEL}#${SEND_CHANNEL}#g" wrangler.toml
-            sed -i "s#\${SENDER_EMAIL}#${SENDER_EMAIL}#g" wrangler.toml
-          else
-            sed -i '/^SEND_CHANNEL = /d' wrangler.toml
-            sed -i '/^SENDER_EMAIL = /d' wrangler.toml
-          fi
-          if [ -n "${PASSWORD}" ]; then
-            sed -i "s#\${PASSWORD}#${PASSWORD}#g" wrangler.toml
-          else
-            sed -i '/^PASSWORD = /d' wrangler.toml
-          fi
-          if [ -n "${API_RATE_LIMIT_PER_MINUTE}" ]; then
-            sed -i "s#\${API_RATE_LIMIT_PER_MINUTE}#${API_RATE_LIMIT_PER_MINUTE}#g" wrangler.toml
-          else
-            sed -i '/^API_RATE_LIMIT_PER_MINUTE = /d' wrangler.toml
-          fi
-          if [ -n "${SHOW_AFF}" ]; then
-            sed -i "s#\${SHOW_AFF}#${SHOW_AFF}#g" wrangler.toml
-          else
-            sed -i '/^SHOW_AFF = /d' wrangler.toml
-          fi
-          if [ "$(printf '%s' "${ENABLE_OPENAPI}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-            sed -i 's/^ENABLE_OPENAPI = .*/ENABLE_OPENAPI = "true"/' wrangler.toml
-          else
-            sed -i 's/^ENABLE_OPENAPI = .*/ENABLE_OPENAPI = "false"/' wrangler.toml
-          fi
-          if [ -n "${SEND_RATE_LIMIT_PER_MINUTE}" ]; then
-            sed -i "s#\${SEND_RATE_LIMIT_PER_MINUTE}#${SEND_RATE_LIMIT_PER_MINUTE}#g" wrangler.toml
-          else
-            sed -i '/^SEND_RATE_LIMIT_PER_MINUTE = /d' wrangler.toml
-          fi
-          if [ -n "${SEND_IP_RATE_LIMIT_PER_MINUTE}" ]; then
-            sed -i "s#\${SEND_IP_RATE_LIMIT_PER_MINUTE}#${SEND_IP_RATE_LIMIT_PER_MINUTE}#g" wrangler.toml
-          else
-            sed -i '/^SEND_IP_RATE_LIMIT_PER_MINUTE = /d' wrangler.toml
-          fi
+          python3 <<'PY'
+          import os
+          import re
+          import sys
+
+          path = "wrangler.toml"
+
+          with open(path, "r", encoding="utf-8") as f:
+              config = f.read()
+
+          # 必须配置的数据库信息
+          required = ["D1_DATABASE_ID", "D1_DATABASE_NAME"]
+          for key in required:
+              if not os.environ.get(key):
+                  sys.exit(f"Error: {key} is required")
+
+          # TOML 字符串转义
+          def toml_escape(value):
+              return value.replace("\\", "\\\\").replace('"', '\\"')
+
+          # 替换字符串占位符
+          string_vars = [
+              "D1_DATABASE_ID",
+              "D1_DATABASE_NAME",
+              "EMAIL_DOMAIN",
+              "COOKIES_SECRET",
+              "TURNSTILE_KEY",
+              "TURNSTILE_SECRET",
+              "MAILBOX_TOKEN_SECRET",
+              "SEND_CHANNEL",
+              "SENDER_EMAIL",
+              "PASSWORD",
+              "SHOW_AFF",
+          ]
+
+          for key in string_vars:
+              value = os.environ.get(key, "")
+              config = config.replace(
+                  "${" + key + "}",
+                  toml_escape(value)
+              )
+
+          # 邮件渠道配置
+          send_channel = os.environ.get("SEND_CHANNEL", "").strip().lower()
+
+          if send_channel:
+              if send_channel == "resend":
+                  if not os.environ.get("RESEND_API_KEY"):
+                      sys.exit("Error: RESEND_API_KEY is required for resend")
+              elif send_channel == "mailchannels":
+                  if not os.environ.get("MAILCHANNELS_API_KEY"):
+                      sys.exit("Error: MAILCHANNELS_API_KEY is required for mailchannels")
+              elif send_channel == "cloudflare":
+                  pass
+              elif send_channel == "send_email":
+                  print("::warning::SEND_CHANNEL=send_email is deprecated; use cloudflare instead.")
+                  send_channel = "cloudflare"
+                  config = config.replace("${SEND_CHANNEL}", "cloudflare")
+              else:
+                  sys.exit(f"Unsupported SEND_CHANNEL: {send_channel}")
+
+              if not os.environ.get("SENDER_EMAIL"):
+                  sys.exit("Error: SENDER_EMAIL is required")
+
+              if not os.environ.get("MAILBOX_TOKEN_SECRET"):
+                  sys.exit("Error: MAILBOX_TOKEN_SECRET is required")
+
+          else:
+              # 未配置邮件发送时，移除相关配置项
+              for key in ["SEND_CHANNEL", "SENDER_EMAIL", "MAILBOX_TOKEN_SECRET"]:
+                  config = re.sub(
+                      rf"(?m)^\s*{key}\s*=.*\n?",
+                      "",
+                      config
+                  )
+
+          # 可选配置项：为空时删除对应行
+          optional_vars = [
+              "PASSWORD",
+              "API_RATE_LIMIT_PER_MINUTE",
+              "SHOW_AFF",
+              "SEND_RATE_LIMIT_PER_MINUTE",
+              "SEND_IP_RATE_LIMIT_PER_MINUTE",
+          ]
+
+          for key in optional_vars:
+              value = os.environ.get(key, "")
+              if value:
+                  config = config.replace("${" + key + "}", value)
+              else:
+                  config = re.sub(
+                      rf"(?m)^\s*{key}\s*=.*\n?",
+                      "",
+                      config
+                  )
+
+          # OpenAPI 开关
+          enable_openapi = (
+              os.environ.get("ENABLE_OPENAPI", "").strip().lower() == "true"
+          )
+
+          config = re.sub(
+              r"(?m)^ENABLE_OPENAPI\s*=.*$",
+              f'ENABLE_OPENAPI = "{str(enable_openapi).lower()}"',
+              config
+          )
+
+          # 检查是否仍残留占位符
+          leftovers = re.findall(r"\$\{[A-Z0-9_]+\}", config)
+          if leftovers:
+              sys.exit("Error: unresolved placeholders: " + ", ".join(sorted(set(leftovers))))
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(config)
+
+          print("Wrangler configuration generated successfully.")
+          PY
         env:
           D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
           D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
@@ -142,15 +196,13 @@ jobs:
           MAILCHANNELS_API_KEY: ${{ secrets.MAILCHANNELS_API_KEY }}
           MAILBOX_TOKEN_SECRET: ${{ secrets.MAILBOX_TOKEN_SECRET }}
 
-      # 新增：在部署前应用 D1 数据库迁移
-      # 这一步会明确地告诉 Wrangler 远程执行 D1 数据库的迁移脚本。
       - name: Apply D1 Migrations
-        run: npx wrangler d1 migrations apply ${{ secrets.D1_DATABASE_NAME }} --remote
+        run: npx wrangler d1 migrations apply "$D1_DATABASE_NAME" --remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
 
-      # 部署到 Cloudflare Workers
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
         with:
@@ -158,22 +210,25 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           wranglerVersion: "4.111.0"
 
-      # 设置 Worker 密钥（分开执行，方便排查错误）
       - name: Configure sender secrets
         run: |
-          if [ -z "${SEND_CHANNEL}" ]; then
+          if [ -z "$SEND_CHANNEL" ]; then
             echo "SEND_CHANNEL is empty, skipping secrets"
             exit 0
           fi
+
           echo "SEND_CHANNEL is set, configuring secrets..."
-          if [ -n "${RESEND_API_KEY}" ]; then
+
+          if [ -n "$RESEND_API_KEY" ]; then
             echo "Setting RESEND_API_KEY..."
-            printf '%s' "${RESEND_API_KEY}" | npx wrangler secret put RESEND_API_KEY
+            printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
           fi
-          if [ -n "${MAILCHANNELS_API_KEY}" ]; then
+
+          if [ -n "$MAILCHANNELS_API_KEY" ]; then
             echo "Setting MAILCHANNELS_API_KEY..."
-            printf '%s' "${MAILCHANNELS_API_KEY}" | npx wrangler secret put MAILCHANNELS_API_KEY
+            printf '%s' "$MAILCHANNELS_API_KEY" | npx wrangler secret put MAILCHANNELS_API_KEY
           fi
+
           echo "Secrets configured successfully"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
